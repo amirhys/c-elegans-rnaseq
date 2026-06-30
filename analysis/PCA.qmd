@@ -1,0 +1,112 @@
+---
+title: "Quality control of C.elegans data"
+format:
+  html:
+    code-fold: true
+---
+
+```{r}
+library(tidyverse)
+library(tximport)
+library(rtracklayer)
+library(DESeq2)
+library(GenomicFeatures)
+library(ggplot2)
+
+samples <- c(
+  "K002000093_54873", "K002000093_54875", "K002000093_54877", 
+  "K002000093_54879", "K002000093_54881", "K002000093_54883", 
+  "K002000093_54885", "K002000093_54887", "K002000093_54889", 
+  "K002000244_89704", "K002000244_89706", "K002000244_89708", 
+  "K002000244_89710", "K002000244_89712", "K002000244_89714")
+
+names(samples) <- c(
+  "wt", "wt", "wt", "ama1", "ama1", "ama1", 
+  "daf2", "daf2", "daf2", "wtday1", "wtday1", "wtday1", 
+  "ama1day1", "ama1day1", "ama1day1")
+
+common_path <- '/cellfile/datapublic/ahyseni/cryption/c.elegans/docker/salmon_quant/output'
+
+# reading in the salmon quantification files, e.g.: /cellfile/datapublic/ahyseni/cryption/c.elegans/docker/salmon_quant/output/wt/K002000093_54873/quant.sf
+
+quant_filepaths <- file.path(common_path, names(samples), samples, "quant.sf")
+
+
+sampleTable <- data.frame(
+  sampleName = samples,
+  fileName = quant_filepaths,
+  condition = names(samples))
+
+sampleTable$condition <- factor(sampleTable$condition, levels = unique(names(samples)))
+
+new_conditions <- c(
+  "wt_old", "wt_old", "wt_old",
+  "ama1_old", "ama1_old", "ama1_old",
+  "daf2_old", "daf2_old", "daf2_old",
+  "wt_young", "wt_young", "wt_young",
+  "ama1_young", "ama1_young", "ama1_young"
+)
+
+sampleTable <- data.frame(
+  sampleName = samples,
+  fileName = quant_filepaths,
+  condition = new_conditions
+)
+
+sampleTable$condition <- factor(sampleTable$condition, levels = unique(new_conditions))
+
+# load transcript-gene csv
+tx2gene1 <- read.csv("/cellfile/datapublic/ahyseni/cryption/c.elegans/data/reference_omes/tx2gene.csv")
+
+# import Salmon data and summarize to genes
+txi <- tximport(quant_filepaths, type = "salmon", tx2gene = tx2gene1, ignoreTxVersion = TRUE)
+
+make_dds_and_plot <- function(df, capt) {
+
+  #if (setequal(df, txi_major) == T) {
+    #main = 'PCA for C. elegans RNA-seq (major transcripts)'
+  #} else {
+  main = 'PCA for C. elegans RNA-seq'
+
+  # Create DESeq2 dataset
+  dds <- DESeqDataSetFromTximport(df, colData = sampleTable, design = ~condition)
+  
+  # remove genes with very low counts
+  dds <- dds[rowSums(counts(dds)) > 5, ]
+  
+  # run DESeq normalization
+  dds <- DESeq(dds)
+  vsd <- vst(dds, blind = TRUE, nsub = 700)
+  
+  pcaData <- plotPCA(vsd, intgroup = "condition", returnData = TRUE)
+  percentVar <- round(100 * attr(pcaData, "percentVar"))
+
+  ggplot(pcaData, aes(PC1, PC2, color = condition)) +
+  geom_point(size = 4) +
+  ggtitle(main) +
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  labs(caption = capt) +
+  theme_minimal(base_size = 16) +
+  theme(
+    axis.title = element_text(size = 16),  # Increase axis title size
+    axis.text = element_text(size = 14),   # Increase axis text size
+    plot.title = element_text(size = 18),
+    plot.caption = element_text(size = 20, hjust = 0)  # Increase title size and make it bold
+  )
+}
+
+
+major_transcript_genes <- readRDS('/cellfile/datapublic/ahyseni/cryption/c.elegans/results/major_transcript_genes.rds')
+
+
+# subset the txi counts and metadata to only include major transcripts
+txi_major <- txi
+txi_major$counts <- txi_major$counts[rownames(txi_major$counts) %in% major_transcript_genes, ]
+txi_major$abundance <- txi_major$abundance[rownames(txi_major$abundance) %in% major_transcript_genes, ]
+txi_major$length <- txi_major$length[rownames(txi_major$length) %in% major_transcript_genes, ]
+
+
+make_dds_and_plot(txi, '')
+make_dds_and_plot(txi_major, 'Fig. 2: PCA plot for major transcripts reads')
+```

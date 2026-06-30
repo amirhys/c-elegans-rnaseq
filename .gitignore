@@ -1,0 +1,26 @@
+# R stuff
+.Rhistory
+.RData
+.Rproj.user/
+
+# outputs (future-proof)
+output/
+results/
+*.png
+*.svg
+*.csv
+*.rds
+
+# sequencing data
+*.bam
+*.bai
+*.sf
+quant.sf
+
+# logs
+*.log
+*.out
+*.err
+
+# OS
+.DS_Store

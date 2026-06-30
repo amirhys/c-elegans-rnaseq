@@ -1,0 +1,421 @@
+---
+title: "Quantifying cryptic transcription in C.elegans"
+format:
+  html:
+    code-fold: true
+---
+
+```{r}
+library(tidyverse)
+library(tximport)
+library(readr)
+library(rtracklayer)
+library(ggplot2)
+library(patchwork)
+
+samples <- c(
+  "wt", "wt", "wt", "ama1", "ama1", "ama1", 
+  "daf2", "daf2", "daf2", "wtday1", "wtday1", "wtday1", 
+  "ama1day1", "ama1day1", "ama1day1"
+)
+
+names(samples) <- c(
+  "K002000093_54873", "K002000093_54875", "K002000093_54877", 
+  "K002000093_54879", "K002000093_54881", "K002000093_54883", 
+  "K002000093_54885", "K002000093_54887", "K002000093_54889", 
+  "K002000244_89704", "K002000244_89706", "K002000244_89708", 
+  "K002000244_89710", "K002000244_89712", "K002000244_89714"
+)
+
+samples_dict <- list(c("K002000093_54873", "K002000093_54875", "K002000093_54877"),
+                c("K002000093_54879", "K002000093_54881", "K002000093_54883"),
+                c("K002000093_54885", "K002000093_54887", "K002000093_54889"),
+                c("K002000244_89704", "K002000244_89706", "K002000244_89708"),
+                c("K002000244_89710", "K002000244_89712", "K002000244_89714"))
+
+
+
+names(samples_dict) <- unique(samples)
+
+#View(samples_dict)
+
+setdiff_both <- function(x, y) {
+  union(setdiff(x, y), setdiff(y, x))
+}
+
+
+common_path <- '/cellfile/datapublic/ahyseni/cryption/c.elegans/docker/salmon_quant/output'
+
+# reading in the salmon quantification files, e.g.: /cellfile/datapublic/ahyseni/cryption/c.elegans/docker/salmon_quant/output/wt/K002000093_54873/quant.sf
+
+quant_filepaths <- file.path(common_path, samples, names(samples), "quant.sf")
+
+quant_filepaths
+# load the files in one matirx
+all_quant_files <- tximport(quant_filepaths, type = "salmon", txOut = TRUE)
+
+names(all_quant_files)
+
+# extract only TMP vals
+all_TPMs <- all_quant_files$abundance
+all_lengths <- all_quant_files$length
+
+colnames(all_TPMs) <- paste0(names(samples), '_', samples)
+colnames(all_lengths) <- paste0(names(samples), '_', samples)
+
+long_transcripts <- as.data.frame(all_lengths) %>%
+  mutate(mean_length = rowMeans(across(starts_with("K")))) %>%
+  filter(mean_length > 1000)
+
+#View(long_transcripts)
+length(rownames(long_transcripts))
+
+# load gtf file
+gtf_filepath <- '/cellfile/datapublic/ahyseni/cryption/c.elegans/data/reference_omes/Caenorhabditis_elegans.WBcel235.90.gtf'
+gtf_data <- import(gtf_filepath)
+gtf_df <- as.data.frame(mcols(gtf_data))
+
+# extract relevant columns from gtffile (gene_id and transcript_id)
+
+gene_transcript_map <- gtf_df %>%
+  filter(type == "transcript") %>%
+  filter(transcript_biotype == "protein_coding") %>% 
+  dplyr::select(gene_id, gene_name, transcript_id) %>%
+  distinct()
+
+#View(gtf_df %>% filter(transcript_id == 'C53C7.5b'))
+
+all_TPMs_with_genes <- as.data.frame(all_TPMs) %>%
+  rownames_to_column("transcript_id") %>%
+  filter(transcript_id %in% gene_transcript_map$transcript_id) %>%
+  left_join(gene_transcript_map, by = "transcript_id")
+
+length(all_TPMs_with_genes$transcript_id)
+length(gene_transcript_map$transcript_id)
+
+filtered_TPMs <- all_TPMs_with_genes %>%
+  filter(transcript_id %in% rownames(long_transcripts))
+
+
+major_tr_list <- list()
+
+
+for (i in names(samples_dict)) {
+  print(i)
+  major_tr <- filtered_TPMs %>%
+  #filter(colname > 1000) %>%
+  group_by(gene_id) %>%
+  mutate(mean_TPM = rowMeans(across(ends_with(i)))) %>%
+  filter(mean_TPM > 1) %>%
+  slice_max(order_by = mean_TPM, n = 1, with_ties = FALSE)
+  
+  major_tr_list <- append(major_tr_list, list(major_tr[, c('transcript_id', 'mean_TPM','gene_id')]))
+}
+
+names(major_tr_list) <- names(samples_dict)
+names(major_tr_list)
+
+condition_names <- names(major_tr_list)
+ratio_matrix <- matrix(NA, nrow = length(condition_names), ncol = length(condition_names),
+                       dimnames = list(condition_names, condition_names))
+
+
+for (i in 1:(4)) {
+  for (j in (i + 1):5) {
+
+    intersect_len <- length(intersect(major_tr_list[[i]]$transcript_id, major_tr_list[[j]]$transcript_id))
+    diff_len <- length(setdiff_both(major_tr_list[[i]]$transcript_id, major_tr_list[[j]]$transcript_id))
+  
+    ratio <- intersect_len / (intersect_len + diff_len)
+    ratio_matrix[i, j] <- ratio
+    ratio_matrix[j, i] <- ratio 
+  }
+}
+write.csv(ratio_matrix, "ratio_matrix.csv", row.names = TRUE)
+#View(ratio_matrix)
+
+
+intersect_len <- Reduce(intersect, 
+                  list(major_tr_list[[1]]$transcript_id,
+                       major_tr_list[[2]]$transcript_id,
+                       major_tr_list[[3]]$transcript_id,
+                       major_tr_list[[4]]$transcript_id,
+                       major_tr_list[[5]]$transcript_id)) %>% length()
+
+
+diff_len <- Reduce(setdiff_both, 
+                  list(major_tr_list[[1]]$transcript_id,
+                       major_tr_list[[2]]$transcript_id,
+                       major_tr_list[[3]]$transcript_id,
+                       major_tr_list[[4]]$transcript_id,
+                       major_tr_list[[5]]$transcript_id)) %>% length()
+
+ratio <- intersect_len / (intersect_len + diff_len)
+ratio
+
+all_majors <- intersect(major_tr_list[[1]]$gene_id, major_tr_list[[2]]$gene_id) %>%
+  intersect(major_tr_list[[3]]$gene_id) %>%
+  intersect(major_tr_list[[4]]$gene_id) %>%
+  intersect(major_tr_list[[5]]$gene_id)
+
+length(all_majors)
+major_tr_list[[1]]$gene_id |> length()
+```
+
+```{r}
+# further analysis:
+
+common_path <- '/cellfile/datapublic/ahyseni/cryption/c.elegans/docker/featureCounts/output/'
+
+
+exon_counts <- read.delim(paste0(common_path, 'ama1/K002000093_54879/exon_counts.txt'), comment.char = "#")
+colnames(exon_counts)[7] <- 'bam_counts'
+
+exon_numbers <- exon_counts %>% 
+  group_by(Geneid) %>% 
+  mutate(n_exons = n()) %>% 
+  ungroup() %>% 
+  group_by(n_exons) %>% 
+  mutate(total_exons = sum(n_exons/n_exons)/(n_exons)) %>% 
+  ungroup() %>% 
+  dplyr::select(n_exons, total_exons) %>% 
+  distinct() %>% 
+  arrange(n_exons) %>% 
+  filter(n_exons > 1)
+
+ggplot(exon_numbers, aes(x = factor(n_exons), y = total_exons)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  labs(x = "Number of Exons", y = "Number of Genes", title = "Number of Genes containing n Exons") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+
+
+write_redmine_table <- function(df, file_path) {
+  
+  file_conn <- file(file_path, "w")
+  
+
+  writeLines("| n_exons | total_exons |", file_conn)
+  writeLines("|---------|------------|", file_conn)
+  
+  apply(df, 1, function(row) {
+    writeLines(sprintf("| %s | %s |", row[1], row[2]), file_conn)
+  })
+  
+  close(file_conn)
+}
+
+
+#write_redmine_table(exon_counts, "redmine_table.txt")
+
+
+all_relative_expressions <- data.frame()
+
+
+for (sample_name in names(samples)) {
+  sample_type <- samples[sample_name]
+  print(sample_type)
+  file_path <- paste0(common_path, sample_type, "/", sample_name, "/exon_counts.txt")
+  
+  exon_counts <- read.delim(file_path, comment.char = "#")
+  
+  colnames(exon_counts)[7] <- 'bam_counts'
+  relative_expression <- exon_counts %>% 
+    mutate(., normalized_counts = (bam_counts / (Length/1000))) %>% 
+    mutate(., seq_depth = sum(normalized_counts)) %>% 
+    mutate(., EPM = normalized_counts * ((10^6)/seq_depth)) %>% 
+    group_by(Geneid) %>%
+    mutate(Ei = EPM / EPM[1]) %>% 
+    mutate(Exon = row_number()) %>% 
+    ungroup() %>% 
+    group_by(Exon) %>% 
+    mutate(Median_Ei = median(na.omit(Ei))) %>% 
+    #filter(Exon %in% as.character(1:5)) %>% 
+    dplyr::select(Exon, Median_Ei) %>% 
+    distinct(Exon, Median_Ei) %>% 
+    mutate(Sample = sub(".*_", "", sample_name), SampleType = sample_type)
+  #break
+  all_relative_expressions <- bind_rows(all_relative_expressions, relative_expression)
+}
+View(all_relative_expressions)
+
+
+#ggplot(relative_expression, aes(x = Exon, y = Median_Ei)) +
+  #geom_point(color = "red", size = 2) +
+  #labs(title = "Relative Expression of Exon i to Exon 1",
+       #x = 'Exon i',
+       #y = 'Median Expression of Exon i')
+
+all_relative_expressions <- all_relative_expressions %>%
+  mutate(SampleType = recode(SampleType,
+                             "wtday1" = "wt_young",
+                             "ama1day1" = "ama1_young",
+                             "wt" = "wt_old",
+                             "ama1" = "ama1_old",
+                             "daf2" = "daf2_old"))
+
+
+
+
+plot_sample_type <- function(sample_type) {
+  data_filtered <- all_relative_expressions %>%
+    filter(SampleType == sample_type)
+  
+  if (grepl('day1', sample_type)) {
+    title_sample <- sample_type
+  } else {
+    title_sample <- paste0(sample_type)
+  }
+  
+  
+  ggplot() +
+    geom_line(data = data_filtered, aes(x = Exon, y = Median_Ei, group = Sample, color = Sample), alpha = 0.5) +
+    geom_point(data = data_filtered, aes(x = Exon, y = Median_Ei, color = Sample), size = 2) +
+    #geom_line(data = all_relative_expressions_summary %>% filter(SampleType == sample_type), 
+              #aes(x = Exon, y = Median_Ei), color = "black", size = 1.2) +
+    labs(title = paste0("Relative Expression of Exon i to Exon 1"),
+         subtitle = title_sample,
+         x = "Exon i",
+         y = "Median Expression of Exon i") +
+    theme_minimal(base_size = 16) +
+    theme(element_text(size = 24)) +
+    coord_cartesian(ylim = c(0.1, 4))
+    #+ theme(legend.position = "none")
+}
+
+p1 <- plot_sample_type("wt_young")
+p2 <- plot_sample_type("wt_old")
+p3 <- plot_sample_type("ama1_young")
+p4 <- plot_sample_type("ama1_old")
+p5 <- plot_sample_type("daf2_old")
+
+all_relative_expressions_summary <- all_relative_expressions %>%
+  group_by(Exon, SampleType) %>%
+  summarise(Mean_Median_Ei = mean(Median_Ei, na.rm = TRUE), .groups = "drop")
+
+p6 <- ggplot(all_relative_expressions_summary, aes(x = Exon, y = Mean_Median_Ei, color = SampleType)) +
+  geom_point(size = 2) +
+  geom_line(aes(group = SampleType), alpha = 0.8) + 
+  labs(title = "Relative Expression of Exon i to Exon 1 (per condition)",
+       x = "Exon i",
+       y = "Median Expression of Exon i",
+       color = "Condition") +
+  theme_minimal(base_size = 16)
+
+Fig2 <- (p1 + p2) / (p3 + p4) / (p5 + p6) + plot_annotation(tag_levels = 'A')
+
+ggsave(plot = Fig2, file = 'C_elegans_Ei_vals.png', width = 40, height = 40, unit = 'cm')
+```
+
+```{r}
+exon_counts <- read.delim(paste0(common_path, 'ama1/K002000093_54879/exon_counts.txt'), comment.char = "#")
+colnames(exon_counts)[7] <- 'bam_counts'
+
+genes_to_keep <- exon_counts %>% 
+  group_by(Geneid) %>% 
+  filter(n() >= 5) %>%
+  filter(n() <= 20) %>% 
+  dplyr::select(Geneid)
+
+Ei_values <- data.frame()
+
+for (sample_name in names(samples)) {
+  sample_type <- samples[sample_name]
+  print(sample_type)
+  file_path <- paste0(common_path, sample_type, "/", sample_name, "/exon_counts.txt")
+  
+  exon_counts <- read.delim(file_path, comment.char = "#")
+    
+  colnames(exon_counts)[7] <- 'bam_counts'
+  
+  Ei_for_sample <- exon_counts %>%
+    filter(Geneid %in% genes_to_keep$Geneid) %>% 
+    mutate(., normalized_counts = (bam_counts / (Length/1000))) %>% 
+    mutate(., seq_depth = sum(normalized_counts)) %>% 
+    mutate(., EPM = normalized_counts * ((10^6)/seq_depth)) %>% 
+    group_by(Geneid) %>%
+    mutate(Ei = EPM / EPM[1]) %>% 
+    mutate(Exon = ifelse(row_number() == n(), "last", as.character(row_number()))) %>%
+    filter(Exon %in% c("2", "3", "4", "last")) %>% # must be done after normalization by sequencing depth
+    dplyr::select(Geneid, Exon, Ei) %>%
+    mutate(Sample = sample_name, SampleType = sample_type)
+
+  Ei_values <- bind_rows(Ei_values, Ei_for_sample)
+}
+
+Ei_mean <- data.frame()
+Ei_mean <- Ei_values %>%
+  group_by(SampleType, Geneid, Exon) %>%
+  summarize(mean_Ei = mean(Ei, na.rm = TRUE), .groups = 'drop')
+
+get_FCs <- function(compared1, compared2) {
+  FC <- Ei_mean %>%
+  filter(SampleType %in% c(compared1, compared2)) %>%
+  filter(Geneid %in% intersect(major_tr_list[[compared1]]$transcript_id, major_tr_list[[compared2]]$transcript_id)) %>%
+  pivot_wider(names_from = SampleType, values_from = mean_Ei, names_prefix = "mean_") %>%
+  mutate(FC_vals = get(paste0("mean_", compared1)) / get(paste0("mean_", compared2))) 
+}
+
+FC_wt_old_vs_wt_young <- get_FCs('wt', 'wtday1')
+FC_daf2_old_vs_wt_old <- get_FCs('daf2', 'wt')
+FC_ama1_old_vs_wt_old <- get_FCs('ama1', 'wt')
+FC_ama1_old_vs_ama1_young <- get_FCs('ama1', 'ama1day1')
+
+
+
+make_plots <- function(data) {
+  vals <- data$FC_vals
+  color1 <- "skyblue"
+  color2 <- "black"
+
+  print(summary(data))
+
+  # Create subtitle from variable name
+  subt <- deparse(substitute(data))
+  subt <- gsub('^FC_', '', subt)                # remove "FC_" prefix
+  subt <- gsub('_vs_', ' vs ', subt)            # replace "_vs_" with " vs "
+  print(subt)
+
+  ggplot(data, aes(x = factor(Exon), y = log2(vals))) +
+    geom_boxplot(fill = color1, color = color2, outlier.shape = NA, size = 0.3, fatten = 1) +
+    coord_cartesian(ylim = c(-0.5, 0.5)) +
+    geom_hline(yintercept = 0) +
+    labs(x = "Exon Position", y = expression(log[2]~"ratio of ratios"), 
+         title = "Distribution of Fold Changes",
+         subtitle = subt) +
+    theme_minimal(base_size = 16) +
+    theme(
+      plot.title = element_text(size = 22, hjust = 0.5, family = "Arial"),
+      plot.subtitle = element_text(size = 22, hjust = 0.5, family = "Arial"),
+      axis.title.x = element_text(size = 20, family = "Arial"),
+      axis.title.y = element_text(size = 20, family = "Arial")
+    )
+}
+
+p1 <- make_dds_and_plot(txi, '')
+p2 <- make_plots(FC_wt_old_vs_wt_young)
+p3 <- make_plots(FC_daf2_old_vs_wt_old)
+p4 <- make_plots(FC_ama1_old_vs_wt_old)
+p5 <- make_plots(FC_ama1_old_vs_ama1_young)
+
+pca_row <- plot_spacer() + p1 + plot_spacer()
+
+# Make PCA row wider by shrinking side spacers
+pca_row <- pca_row + plot_layout(widths = c(0.5, 2, 0.5))  # Wider middle
+
+# Combine everything into final layout
+Fig1 <- pca_row / (p2 + p3) / (p4 + p5) +
+  plot_layout(heights = c(1.4, 1, 1)) +  # Make PCA taller (quadratic shape)
+  plot_annotation(
+    tag_levels = 'A',
+    theme = theme(
+      plot.tag = element_text(size = 24, face = "bold", family = "Arial")
+    )
+  )
+
+
+ggsave(plot = Fig1, device = 'svg', file = 'C_elegans_PCA_and_Boxplots.svg', width = 40, height = 40, unit = 'cm')
+ggsave(plot = Fig1, file = 'C_elegans_PCA_and_Boxplots.png', width = 40, height = 40, unit = 'cm')
+```
+
